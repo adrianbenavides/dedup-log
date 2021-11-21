@@ -213,7 +213,7 @@ impl DedupLog {
         // After the channel is closed, we run the status method one last time.
         self.status().await?;
         tracing::debug!("Sending exit message to exit channel");
-        // Send the exit message back to the exit channel.
+        // Best effort trying to send the exit message back to the exit channel.
         let _ = exit_tx.send(()).await;
         Ok(())
     }
@@ -270,9 +270,20 @@ impl DedupLogHandle {
             // Create a new task to listen to the tokio's ctrlc signal.
             let handle = handle.clone();
             tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
-                tracing::debug!("Tokio's ctrl_c signal received");
-                let _ = handle.close().await;
+                match tokio::signal::ctrl_c().await {
+                    Ok(_) => {
+                        tracing::debug!("Tokio's ctrl_c signal received");
+                        // Best effort to try sending the message to the channel. Whether it succeeds
+                        // or not, we drop this task, so we don't care about the result.
+                        let _ = handle.close().await;
+                    }
+                    Err(err) => {
+                        // We could end up here if the OS fails to register the signal.
+                        // In that case, we won't be able to react to this signal, so
+                        // we print the error and we move on.
+                        tracing::debug!("{}", err);
+                    }
+                }
             });
         };
         let _status_signal = {
@@ -284,7 +295,10 @@ impl DedupLogHandle {
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(flush_period).await;
-                    let _ = handle.status().await;
+                    // If this fails, the channel is closed, so we break the loop and drop this task.
+                    if handle.status().await.is_err() {
+                        break;
+                    }
                 }
             });
         };
@@ -299,7 +313,7 @@ impl DedupLogHandle {
         while let Some(Ok(line)) = lines.next().await {
             // If there is any error processing the message we want to stop iterating the stream
             // so we can close it and finish with this client.
-            if let Err(_) = self.process_message(line).await {
+            if self.process_message(line).await.is_err() {
                 break;
             }
         }
