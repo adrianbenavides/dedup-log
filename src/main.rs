@@ -126,17 +126,14 @@ impl DedupLog {
     async fn listen(mut self, mut event_rx: mpsc::Receiver<Event>) -> anyhow::Result<()> {
         while let Some(event) = event_rx.recv().await {
             tracing::debug!("Event received: {:?}", event);
-            let res = match event {
+            match event {
                 Event::Process(log_line) => self.process(log_line).await,
                 Event::Status() => {
                     self.status().await?;
                     Ok(())
                 }
                 Event::Exit(exit_tx) => self.exit(&mut event_rx, exit_tx).await,
-            };
-            if let Err(err) = res {
-                tracing::error!("Failed processing event. {:?}", err);
-            }
+            }?;
         }
         Ok(())
     }
@@ -186,18 +183,21 @@ impl DedupLog {
         // into the new structure without cloning them.
         let total_len = self.log.len();
         let total_unique: HashSet<u32> = self.log.drain(..).collect();
-        let total_unique_len = total_unique.len();
-        let period_duplicated_len = total_len - total_unique_len;
-        let period_unique_len = period_len - period_duplicated_len;
+        let status = {
+            let total_unique_len = total_unique.len();
+            let period_duplicated_len = total_len - total_unique_len;
+            let period_unique_len = period_len - period_duplicated_len;
+            let status =
+                StatusReport::new(period_unique_len, period_duplicated_len, total_unique_len);
+            tracing::info!("{}", status);
+            status
+        };
 
         // We convert the total_unique set back to a vec, consuming the set to avoid cloning the values.
         let _update_log = {
             self.log = total_unique.into_iter().collect();
             self.previous_period_len = self.log.len();
         };
-
-        let status = StatusReport::new(period_unique_len, period_duplicated_len, total_unique_len);
-        tracing::info!("{}", status);
 
         Ok(status)
     }
