@@ -1,22 +1,24 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
+use config::Config as CConfig;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Duration;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{Framed, LinesCodec};
 
 const TERMINATE_SEQUENCE: &str = "terminate";
-const FLUSH_PERIOD_SECS: u64 = 10;
-const LOG_FILE: &str = "numbers.log";
+const CONFIG_FILE: &str = "config.toml";
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
+    let config = Config::new(CONFIG_FILE).context("Error loading config")?;
     tracing_subscriber::fmt::init();
+
     // Create an mpsc channel to listen for the exit signal. This signal can come from either
     // a TCP message containing the terminate sequence or the tokio's ctrlc signal, that's why
     // we need an mpsc and not a oneshot channel. We expect to receive at most 2 exit messages
@@ -26,22 +28,15 @@ async fn main() -> anyhow::Result<()> {
 
     // We pass the exit tx end to the DedupLog so it can send the exit signal back upon
     // receiving an exit message.
-    let handle = {
-        let config = Config {
-            flush_period: Duration::from_secs(FLUSH_PERIOD_SECS),
-            log_file: LOG_FILE.to_string(),
-        };
-        DedupLog::start(config, exit_tx).await?
-    };
+    let handle = { DedupLog::start(config.clone(), exit_tx).await? };
 
     // To limit the number of concurrent clients connected to the TCP listener, we use a Semaphore.
     // Each time a new client is accepted, it borrows permit until it's finished. Then the client
     // returns the permit back to the semaphore.
-    let max_clients = 5;
-    let semaphore = Arc::new(Semaphore::new(max_clients));
+    let semaphore = Arc::new(Semaphore::new(config.max_clients));
 
-    let tcp_listener = TcpListener::bind("localhost:4000").await?;
-    tracing::debug!("Accepting connections at localhost:4000");
+    let tcp_listener = TcpListener::bind(format!("localhost:{}", config.port)).await?;
+    tracing::debug!("Accepting connections at localhost:{}", config.port);
     loop {
         // First off, we borrow a permit from the semaphore. We need to do this first because
         // otherwise we won't let any change to the exit_rx to receive the message, as the
@@ -63,24 +58,45 @@ async fn main() -> anyhow::Result<()> {
                     semaphore.available_permits()
                 );
                 let handle = handle.clone();
-                // We move the permit to the handler so it can drop it once it's done processing the stream.
-                tokio::spawn(handle.stream(stream, permit));
+                // We move the permit to the task so it can drop it once it's done processing the stream.
+                tokio::spawn(async move {
+                    let _ = handle.stream(stream).await;
+                    drop(permit);
+                });
             }
         }
     }
     Ok(())
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
 struct Config {
+    log_level: String,
+    port: u32,
+    max_clients: usize,
     flush_period: Duration,
     log_file: String,
+}
+
+impl Config {
+    fn new(path: &str) -> anyhow::Result<Self> {
+        let mut c = CConfig::new();
+        c.merge(config::File::with_name(path))?;
+        let config: Self = c.try_into()?;
+        std::env::set_var("RUST_LOG", &config.log_level);
+        Ok(config)
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            flush_period: Duration::from_secs(FLUSH_PERIOD_SECS),
-            log_file: format!("{}.test", LOG_FILE),
+            log_level: "debug".to_string(),
+            port: 4000,
+            max_clients: num_cpus::get(),
+            flush_period: Duration::from_secs(10),
+            log_file: "numbers.log".to_string(),
         }
     }
 }
@@ -308,7 +324,7 @@ impl DedupLogHandle {
 
     // The main method of this struct. Transforms the TcpStream instance into an object that can
     // be easily iterated as a file, one line at a time as they arrive from the client.
-    async fn stream(self, stream: TcpStream, permit: OwnedSemaphorePermit) -> anyhow::Result<()> {
+    async fn stream(self, stream: TcpStream) -> anyhow::Result<()> {
         let mut lines = Framed::new(stream, LinesCodec::new());
         while let Some(Ok(line)) = lines.next().await {
             // If there is any error processing the message we want to stop iterating the stream
@@ -317,8 +333,7 @@ impl DedupLogHandle {
                 break;
             }
         }
-        drop(permit);
-        tracing::info!("Client finished, releasing permit");
+        tracing::info!("Client finished");
         Ok(())
     }
 

@@ -1,0 +1,5 @@
+log_level = "debug"
+port = 4000
+max_clients = 5
+flush_period_secs = 10
+log_file = "numbers.log"
