@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use hashbrown::HashSet;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
@@ -163,29 +163,34 @@ impl DedupLog {
     // Here is where the most heavy task is performed. Basically, we create a set out of the vec
     // to detect and remove the duplicates, write to the log file and print the status report.
     async fn status(&mut self) -> anyhow::Result<StatusReport> {
-        // We get the elements from the previous period and the elements from the current period.
-        // We convert both slices to sets so we can compute the difference between them and
-        // the unique items of the current period.
-        let last_period = self.log[..self.previous_period_len]
-            .iter()
-            .collect::<HashSet<_>>();
+        // We get the elements added since the last period.
         let period = &self.log[self.previous_period_len..];
         let period_len = period.len();
-        let period_unique = period.iter().collect::<HashSet<_>>();
 
-        // We can now write the new unique items to the log file. To reduce the I/O overhead, we create a String
-        // with all the contents we want to dump so we write to the file just once.
         let _write_new_unique_to_log = {
+            // We get the elements up to the last period (total = last_period + period).
+            // We convert both slices to sets so we can compute the unique items of the current period
+            // by computing the difference between them.
+            let last_period = self.log[..self.previous_period_len]
+                .iter()
+                .collect::<HashSet<_>>();
+            let period_unique = period.iter().collect::<HashSet<_>>();
+            let to_write = period_unique.difference(&last_period).collect::<Vec<_>>();
+
+            // We can now write the new unique items to the log file.
             let mut log_file = OpenOptions::new()
                 .append(true)
                 .write(true)
                 .open(&self.config.log_file)
                 .await?;
+
+            // To reduce the I/O overhead, we create a String with all the contents we want
+            // to dump so we write to the file just once.
             let mut buffer = String::new();
-            let to_write = period_unique.difference(&last_period).collect::<Vec<_>>();
+
+            // If there are more than 1_000_000 items to write, we write them in chunks to avoid
+            // allocating too much memory at once at the expense of doing multiple I/O operations.
             for chunk in to_write.chunks(1_000_000) {
-                // If there are more than 1_000_000 items to write, we write them in chunks to avoid
-                // allocating too much memory at once at the expense of doing multiple I/O operations.
                 buffer.clear();
                 for item in chunk {
                     buffer.push_str(&format!("{}\n", LogLine::try_from(***item)?.line));
@@ -195,8 +200,8 @@ impl DedupLog {
         };
 
         // We compute now the rest of the metrics for the status report.
-        // Draining the vector has the advantage that we both empty the vector and move the values
-        // into the new structure without cloning them.
+        // By draining the vector we both empty the vector and move the values
+        // into the new structure, avoiding cloning them.
         let total_len = self.log.len();
         let total_unique: HashSet<u32> = self.log.drain(..).collect();
         let status = {
