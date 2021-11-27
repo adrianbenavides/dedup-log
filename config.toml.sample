@@ -1,4 +1,4 @@
-log_level = "debug"
+log_level = "info"
 port = 4000
 max_clients = 5
 flush_period_secs = 10
