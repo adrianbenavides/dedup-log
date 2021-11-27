@@ -82,8 +82,14 @@ struct Config {
 impl Config {
     fn new(path: &str) -> anyhow::Result<Self> {
         let mut c = CConfig::new();
-        c.merge(config::File::with_name(path))?;
-        let config: Self = c.try_into()?;
+        let config: Config = {
+            if std::path::Path::new(path).exists() {
+                c.merge(config::File::with_name(path))?;
+                c.try_into()?
+            } else {
+                Config::default()
+            }
+        };
         std::env::set_var("RUST_LOG", &config.log_level);
         Ok(config)
     }
@@ -92,7 +98,7 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            log_level: "debug".to_string(),
+            log_level: "info".to_string(),
             port: 4000,
             max_clients: num_cpus::get(),
             flush_period: Duration::from_secs(10),
