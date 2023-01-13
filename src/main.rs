@@ -2,7 +2,6 @@ use hashbrown::HashSet;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
-use config::Config as CConfig;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -81,11 +80,12 @@ struct Config {
 
 impl Config {
     fn new(path: &str) -> anyhow::Result<Self> {
-        let mut c = CConfig::new();
         let config: Config = {
             if std::path::Path::new(path).exists() {
-                c.merge(config::File::with_name(path))?;
-                c.try_into()?
+                config::Config::builder()
+                    .add_source(config::File::with_name(path))
+                    .build()?
+                    .try_deserialize()?
             } else {
                 Config::default()
             }
@@ -173,7 +173,8 @@ impl DedupLog {
         let period = &self.log[self.previous_period_len..];
         let period_len = period.len();
 
-        let _write_new_unique_to_log = {
+        // write new unique to log
+        {
             // We get the elements up to the last period (total = last_period + period).
             // We convert both slices to sets so we can compute the unique items of the current period
             // by computing the difference between them.
@@ -203,7 +204,7 @@ impl DedupLog {
                 }
                 log_file.write_all(buffer.as_bytes()).await?;
             }
-        };
+        }
 
         // We compute now the rest of the metrics for the status report.
         // By draining the vector we both empty the vector and move the values
@@ -221,10 +222,8 @@ impl DedupLog {
         };
 
         // We convert the total_unique set back to a vec, consuming the set to avoid cloning the values.
-        let _update_log = {
-            self.log = total_unique.into_iter().collect();
-            self.previous_period_len = self.log.len();
-        };
+        self.log = total_unique.into_iter().collect();
+        self.previous_period_len = self.log.len();
 
         Ok(status)
     }
@@ -293,7 +292,9 @@ impl DedupLogHandle {
     ) -> Self {
         tracing::debug!("Starting DedupLogHandle");
         let handle = Self { event_tx, exit_tx };
-        let _exit_signal = {
+
+        // exit_signal
+        {
             // Create a new task to listen to the tokio's ctrlc signal.
             let handle = handle.clone();
             tokio::spawn(async move {
@@ -312,8 +313,10 @@ impl DedupLogHandle {
                     }
                 }
             });
-        };
-        let _status_signal = {
+        }
+
+        // status signal
+        {
             // Create a new task to send periodical Status messages to the DedupLog instance.
             // This must be handled in an exclusive loop to have full control over its
             // iterations and avoid interrupting the sleep future.
@@ -328,7 +331,7 @@ impl DedupLogHandle {
                     }
                 }
             });
-        };
+        }
         tracing::info!("DedupLogHandle started");
         handle
     }
